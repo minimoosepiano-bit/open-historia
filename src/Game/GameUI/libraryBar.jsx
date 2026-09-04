@@ -1071,6 +1071,12 @@ const LibraryTopBar = () => {
   const setMenuOpen = (open) => {
     menuOpenDefault = open;
     setMenuOpenState(open);
+    // Broadcast so background work can stand down while the player is off the
+    // board — the real-time clock (Game/AI/realtimeClock.js) pauses on this
+    // rather than keep simulating a game that is being switched away from.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("oh:main-menu", { detail: { open } }));
+    }
   };
   // Bridge for outside callers: open the main menu on a library tab.
   _openLibraryTab = (tab) => {

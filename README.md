@@ -44,6 +44,7 @@
 ## ✨ Features
 
 - __interactive world map:__ watch territory, borders, and nations shift as history unfolds
+- __real-time play:__ press play and the calendar runs on its own — events generate continuously as time passes, and orders you submit go out at once instead of waiting for a turn
 - __ai-generated events:__ dynamic events shaped by your decisions and the state of the world
 - __diplomacy:__ negotiate with AI-controlled nations through natural language chat — click any country to talk to it or get an AI intelligence briefing
 - __ai advisor:__ consult your advisor for strategic guidance, economic analysis, and situation summaries
@@ -154,6 +155,29 @@ Then open **http://localhost:3000** in your browser.
 > runs this for you automatically, so a plain ZIP download works too — no Git LFS needed.
 
 ---
+
+## ⏱️ Real time
+
+Press **▶** on the clock under the date to start the world. From there the calendar
+advances by itself, the simulator generates the events for each slice of time as it
+passes, and the map, the event log and the camera follow them live — no jump button,
+no waiting for a turn to be asked for.
+
+- **Speed** — the `1×`–`4×` pill sets how fast the calendar runs (from a few days per
+  turn up to a couple of months). Turns still land on roughly the same real-world
+  cadence at every speed; what changes is how much history each one covers.
+- **Orders** — submitting an action while the clock runs pushes the world to answer at
+  once: the next turn goes out as soon as the simulator is free, rather than at the end
+  of the current one.
+- **Pausing** — the clock pauses itself when you open the main menu, and holds while the
+  tab is in the background so a buried game never runs up a bill. A manual jump or an
+  undo from the **Timeline** panel also pauses it and hands you back the wheel.
+- **Nothing else changes** — a real-time turn *is* a jump: same generation, same
+  validation, same impacts on the world, same undo history. The **Timeline** panel and
+  its fixed jumps are still there whenever you want to move a set span at once.
+
+Real-time mode makes one AI request roughly every half minute while it runs, so keep an
+eye on cost if you are playing against a metered provider.
 
 ## 🌍 Scenarios
 

@@ -5,6 +5,7 @@ import advancedFormat from "dayjs/plugin/advancedFormat";
 import { JSON_URLS, readJson } from "../../runtime/assets.js";
 import { useCountryDisplayName } from "../../runtime/polityNames.js";
 import { generateActionSuggestions, refinePlayerAction } from "../AI/gameplay.js";
+import { requestRealtimeTick, useRealtimeClock } from "../AI/realtimeClock.js";
 import { revertUnitOrder } from "../Map/unitsController.js";
 import {
     buildActionDisplayText,
@@ -246,6 +247,7 @@ const ActionsPanel = ({ isOpen, onClose, onOpenAdvisor }) => {
     const [isSuggesting, setIsSuggesting] = React.useState(false);
     const inputRef = React.useRef(null);
     const lastRoundRef = React.useRef(null);
+    const clock = useRealtimeClock();
 
     React.useEffect(() => {
         if (!isOpen) {
@@ -338,6 +340,12 @@ const ActionsPanel = ({ isOpen, onClose, onOpenAdvisor }) => {
         try {
             await persistActions([...actions, nextAction]);
             setInputValue("");
+            // Real-time mode: an order is something you do to the world NOW, so
+            // the clock hands the world its next slice as soon as the simulator
+            // is free instead of at the end of the current turn. A no-op while
+            // the clock is paused — the order then waits for a jump, exactly as
+            // it always has.
+            requestRealtimeTick();
         } finally {
             setIsSubmitting(false);
         }
@@ -398,6 +406,7 @@ const ActionsPanel = ({ isOpen, onClose, onOpenAdvisor }) => {
         }
 
         await persistActions([...actions, queuedAction]);
+        requestRealtimeTick();
         // Visible click feedback: the suggestion button flips to "✓ Queued".
         setQueuedSuggestionIds((previous) => new Set(previous).add(action.id));
     };
@@ -470,7 +479,26 @@ const ActionsPanel = ({ isOpen, onClose, onOpenAdvisor }) => {
             padding: "1rem 1.25rem 0.75rem",
         }}
         >
-        <span style={{ fontSize: "1rem", fontWeight: 700, letterSpacing: "0.01em" }}>Actions</span>
+        <span style={{ alignItems: "center", display: "flex", fontSize: "1rem", fontWeight: 700, gap: "0.5rem", letterSpacing: "0.01em" }}>
+        Actions
+        {clock.running && (
+            <span
+            title="The world clock is running — submitted orders resolve on the next turn"
+            style={{
+                background: "rgba(21,128,61,0.28)",
+                border: "1px solid rgba(134,239,172,0.45)",
+                borderRadius: "999px",
+                color: "#bbf7d0",
+                fontSize: "0.6rem",
+                fontWeight: 800,
+                letterSpacing: "0.1em",
+                padding: "0.14rem 0.42rem",
+            }}
+            >
+            LIVE
+            </span>
+        )}
+        </span>
         <button
         type="button"
         onClick={onClose}
@@ -507,7 +535,9 @@ const ActionsPanel = ({ isOpen, onClose, onOpenAdvisor }) => {
             margin: 0,
         }}
         >
-        Submit actions for {countryDisplayName} for {gameDate}. Your actions will affect how the game world responds.
+        {clock.running
+            ? `Orders for ${countryDisplayName} go out the moment you submit them — the world is running, and its answer arrives with the next turn.`
+            : `Submit actions for ${countryDisplayName} for ${gameDate}. Your actions will affect how the game world responds.`}
         </p>
 
         <button
