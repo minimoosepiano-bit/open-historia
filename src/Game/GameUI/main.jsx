@@ -153,6 +153,16 @@ const Main = ({
     if (!checkWebGL()) setShowWebGLWarning(true);
   }, []);
 
+  // Nothing to run the clock against once the library is empty (the last game
+  // was deleted, or the app booted with none). Stop it rather than let it fire
+  // turns at a world that isn't there.
+  useEffect(() => {
+    if (!hasNoGames) return;
+    import("../AI/realtimeClock.js")
+      .then(({ pauseRealtime }) => pauseRealtime({ reason: "No game is loaded." }))
+      .catch(() => {});
+  }, [hasNoGames]);
+
   // Idle diplomacy drip: each real-world minute the game is open (and has a
   // running game), there is a small chance a polity messages the player's
   // inbox unprompted. Everything that could break it is guarded inside

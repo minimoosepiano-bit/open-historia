@@ -11,6 +11,14 @@ import {
     loadRegionCatalog,
 } from "../../runtime/assets.js";
 import { loadRollbackSnapshots, maybeGeneratePregameHistory, rollBackToSnapshot, simulateAutoJump, simulateTimelineJump } from "../AI/gameplay.js";
+import {
+    cancelRealtimeTick,
+    cycleRealtimeSpeed,
+    pauseRealtime,
+    subscribeRealtimeTicks,
+    toggleRealtime,
+    useRealtimeClock,
+} from "../AI/realtimeClock.js";
 import { isMainMenuOpen } from "./libraryBar";
 import {
     applyEventImpactsToWorld,
@@ -27,6 +35,12 @@ import { MAP_SETTING_KEYS, useMapSetting } from "../../runtime/mapSettings.js";
 dayjs.extend(advancedFormat);
 
 const TIMELINE_STYLE_ID = "timeline-ui-style";
+// How long each freshly generated event holds the screen before the next one is
+// revealed in real-time mode. Slow enough to read a headline, fast enough that a
+// full turn's worth of events is through before the following turn lands.
+const REALTIME_REVEAL_MS = 3200;
+// …and the floor it is allowed to speed up to when a turn brings a lot of them.
+const REALTIME_MIN_REVEAL_MS = 1200;
 // Clamped so the timeline panel and widget always fit phone screens.
 const PANEL_WIDTH = "min(26.25rem, calc(100vw - 0.9rem))";
 
@@ -132,6 +146,19 @@ const MapIcon = () => (
 const ChevronDownIcon = () => (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="m6 9 6 6 6-6" />
+    </svg>
+);
+
+const PlayIcon = ({ size = 13 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M8 5.5v13l11-6.5-11-6.5Z" />
+    </svg>
+);
+
+const PauseIcon = ({ size = 13 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <rect x="7" y="5" width="3.6" height="14" rx="1.2" />
+    <rect x="13.4" y="5" width="3.6" height="14" rx="1.2" />
     </svg>
 );
 
@@ -892,6 +919,7 @@ const TimelineSkipPanel = ({
         eyebrow=""
         isOpen={isOpen}
         onClose={onClose}
+        subtitle="Time runs on its own from the clock above; jumping from here pauses it and hands you one fixed span."
         title="Timeline"
         topOffset={topOffset}
         >
@@ -1223,6 +1251,217 @@ const TimelineHistoryPanel = ({
     );
 };
 
+// ---- Real-time transport ----------------------------------------------------
+// The date widget says what day it is; this says whether time is moving. Play,
+// speed, what the clock is doing right now, and the events the world has just
+// produced, stacked under the date so the whole clock reads as one control.
+
+const transportStatus = (clock) => {
+    if (!clock.running) {
+        return { text: clock.pausedReason || "Paused", tone: "rgba(255,255,255,0.5)" };
+    }
+    if (clock.frozen) {
+        return { text: "Held — tab in background", tone: "rgba(251,191,36,0.85)" };
+    }
+    if (clock.busy) {
+        return { text: "Simulating…", tone: "rgba(147,197,253,0.92)" };
+    }
+    if (clock.stalled) {
+        return { text: "Catching up…", tone: "rgba(251,191,36,0.85)" };
+    }
+    const seconds = Math.max(
+        0,
+        Math.round((clock.tickDays - clock.pendingDays) * (clock.speed?.secondsPerDay ?? 1)),
+    );
+    return { text: `Live · next in ${seconds}s`, tone: "rgba(134,239,172,0.9)" };
+};
+
+const RealtimeDock = ({
+    clock,
+    disabled,
+    feedEvents,
+    onCancel,
+    onCycleSpeed,
+    onOpenHistory,
+    onToggle,
+    rightShift,
+    topOffset,
+}) => {
+    const status = transportStatus(clock);
+    const running = clock.running;
+
+    return (
+        <div
+        style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.4rem",
+            position: "fixed",
+            right: rightShift,
+            // Directly beneath the 3.5rem date widget.
+            top: `calc(${topOffset} + 3.9rem)`,
+            transition: "right 0.35s cubic-bezier(0.4, 0, 0.2, 1)",
+            // Never as wide as the viewport: on a phone the dock sits just below
+            // the settings button, and the 5.75rem gutter keeps it clear of it.
+            width: "min(18rem, calc(100vw - 5.75rem))",
+            zIndex: 9998,
+        }}
+        >
+        <div
+        style={{
+            ...widgetSurface,
+            alignItems: "stretch",
+            flexDirection: "column",
+            gap: "0.38rem",
+            height: "auto",
+            padding: "0.42rem 0.5rem 0.4rem",
+            position: "static",
+            transition: "none",
+            width: "100%",
+        }}
+        >
+        <div style={{ alignItems: "center", display: "flex", gap: "0.42rem" }}>
+        <button
+        type="button"
+        aria-label={running ? "Pause time" : "Start time"}
+        title={running ? "Pause the world clock" : "Start the world clock — events generate as time passes"}
+        disabled={disabled}
+        onClick={() => { if (!disabled) onToggle(); }}
+        style={{
+            alignItems: "center",
+            background: running ? "rgba(21,128,61,0.34)" : "rgba(37,99,235,0.28)",
+            border: `1px solid ${running ? "rgba(134,239,172,0.55)" : "rgba(96,165,250,0.55)"}`,
+            borderRadius: "999px",
+            color: running ? "#bbf7d0" : "#dbeafe",
+            cursor: disabled ? "default" : "pointer",
+            display: "flex",
+            flexShrink: 0,
+            height: "1.85rem",
+            justifyContent: "center",
+            opacity: disabled ? 0.45 : 1,
+            transition: "all 0.15s ease",
+            width: "1.85rem",
+        }}
+        >
+        {running ? <PauseIcon /> : <PlayIcon />}
+        </button>
+
+        <button
+        type="button"
+        title={`Speed: ${clock.speed?.name ?? ""} — about ${clock.tickDays} day${clock.tickDays === 1 ? "" : "s"} of history per turn. Click to change.`}
+        onClick={onCycleSpeed}
+        style={{
+            background: "rgba(109,40,217,0.24)",
+            border: "1px solid rgba(139,92,246,0.5)",
+            borderRadius: "999px",
+            color: "rgba(216,196,255,0.95)",
+            cursor: "pointer",
+            flexShrink: 0,
+            fontSize: "0.72rem",
+            fontWeight: 800,
+            letterSpacing: "0.03em",
+            padding: "0.3rem 0.55rem",
+            transition: "all 0.15s ease",
+        }}
+        >
+        {clock.speed?.label ?? "2×"}
+        </button>
+
+        <div
+        style={{
+            color: status.tone,
+            flex: 1,
+            fontSize: "0.7rem",
+            fontWeight: 600,
+            minWidth: 0,
+            overflow: "hidden",
+            textAlign: "right",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+        }}
+        >
+        {status.text}
+        </div>
+
+        {clock.busy && (
+            <button
+            type="button"
+            title="Abandon the turn being generated"
+            onClick={onCancel}
+            style={{
+                background: "rgba(220,38,38,0.18)",
+                border: "1px solid rgba(248,113,113,0.45)",
+                borderRadius: "8px",
+                color: "#fecaca",
+                cursor: "pointer",
+                flexShrink: 0,
+                fontSize: "0.68rem",
+                fontWeight: 700,
+                padding: "0.2rem 0.42rem",
+            }}
+            >
+            Stop
+            </button>
+        )}
+        </div>
+
+        {/* Fills as the next slice of history accrues; the world moves when it lands. */}
+        <div style={{ background: "rgba(255,255,255,0.08)", borderRadius: "999px", height: "3px", overflow: "hidden", width: "100%" }}>
+        <div
+        style={{
+            background: running
+                ? (clock.busy ? "rgba(96,165,250,0.9)" : "rgba(74,222,128,0.85)")
+                : "rgba(255,255,255,0.25)",
+            borderRadius: "999px",
+            height: "100%",
+            transition: "width 0.24s linear",
+            width: `${Math.round((clock.progress ?? 0) * 100)}%`,
+        }}
+        />
+        </div>
+
+        {clock.error && (
+            <div style={{ color: "#fecaca", fontSize: "0.68rem", lineHeight: 1.4 }}>
+            {clock.error}
+            </div>
+        )}
+        </div>
+
+        {feedEvents.map((event, index) => (
+            <button
+            key={event.id}
+            type="button"
+            onClick={onOpenHistory}
+            title="Open the event log"
+            style={{
+                background: "rgba(17,24,39,0.92)",
+                backdropFilter: "blur(4px)",
+                border: "1px solid rgba(96,165,250,0.22)",
+                borderRadius: "10px",
+                boxShadow: "0 4px 6px -1px rgba(0,0,0,0.2)",
+                color: "white",
+                cursor: "pointer",
+                display: "block",
+                fontFamily: "sans-serif",
+                // The newest report is the loud one; older ones fade out behind it.
+                opacity: Math.max(0.4, 1 - index * 0.26),
+                padding: "0.42rem 0.55rem",
+                textAlign: "left",
+                width: "100%",
+            }}
+            >
+            <div style={{ color: "rgba(147,197,253,0.8)", fontSize: "0.62rem", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+            {formatDate(event.date)}
+            </div>
+            <div style={{ color: "rgba(255,255,255,0.92)", fontSize: "0.76rem", fontWeight: 600, lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {event.title || "Untitled event"}
+            </div>
+            </button>
+        ))}
+        </div>
+    );
+};
+
 const DateWidget = ({
     activePanel = null,
     mapRef,
@@ -1255,6 +1494,35 @@ const DateWidget = ({
     const openPanel = typeof onSetPanel === "function" ? activePanel : localOpenPanel;
     const isMobile = useIsMobile();
     const disableEventCamera = useMapSetting(MAP_SETTING_KEYS.disableEventCamera);
+    const clock = useRealtimeClock();
+    // The round of the last turn the clock itself produced. Only that turn plays
+    // out live: pressing play must never rewind the map to replay the turn that
+    // was already on screen when the player pressed it.
+    const [liveTurnRound, setLiveTurnRound] = useState(0);
+
+    // A committed real-time turn arrives here first, so the widget shows the new
+    // date and events immediately instead of waiting up to 5s for the poll below
+    // to notice the world moved.
+    useEffect(
+        () =>
+        subscribeRealtimeTicks((result) => {
+            if (!result) {
+                return;
+            }
+
+            setGameData(result.game);
+            setEvents(result.events);
+            setWorldState(result.world);
+            setLiveTurnRound(Number(result.game?.round) || 0);
+            setError("");
+            setFallbackWarning(
+                result.generation?.source === "fallback"
+                ? `Turn generated by fallback: ${result.generation.fallbackReason || "structured AI output was unavailable"}`
+                : "",
+            );
+        }),
+        [],
+    );
 
     useEffect(() => {
         ensureTimelineStyles();
@@ -1393,6 +1661,12 @@ const DateWidget = ({
             return;
         }
 
+        // The player is taking the wheel. A manual jump and a clock tick must
+        // never write a turn at the same time, so stop the clock and abandon
+        // whatever it has in flight — nothing is persisted until a turn commits,
+        // so an abandoned tick costs only the generation it was midway through.
+        pauseRealtime({ reason: "Paused for a manual jump.", cancelInFlight: true });
+
         setPanel("skip");
         setIsLoading(true);
         setError("");
@@ -1445,6 +1719,8 @@ const DateWidget = ({
             return;
         }
 
+        pauseRealtime({ reason: "Paused to undo a turn.", cancelInFlight: true });
+
         setPanel("skip");
         setIsLoading(true);
         setError("");
@@ -1486,12 +1762,17 @@ const DateWidget = ({
     }, [eventLookup, gameData, lookups, worldState]);
 
     const latestTurnRecord = historyRecords[0] || null;
+    // Events reveal one at a time either because the log is open in front of the
+    // player, or because this turn is one the running clock just delivered.
+    const isLiveTurn =
+    clock.running && liveTurnRound > 0 && latestTurnRecord?.round === liveTurnRound;
+    const isRevealing = openPanel === "history" || isLiveTurn;
     const persistedFallbackWarning = latestTurnRecord?.source === "fallback"
     ? `Turn generated by fallback: ${latestTurnRecord.fallbackReason || "structured AI output was unavailable"}`
     : "";
     const totalVisibleEvents = latestTurnRecord?.events?.length || 0;
     const activeVisibleEvent =
-    openPanel === "history" && totalVisibleEvents > 0
+    isRevealing && totalVisibleEvents > 0
     ? latestTurnRecord.events[Math.min(Math.max(visibleEventCount, 1), totalVisibleEvents) - 1]
     : null;
 
@@ -1510,11 +1791,19 @@ const DateWidget = ({
     const rawGameDate = gameData?.gameDate || gameData?.startDate || "";
     const parsedGameDate = rawGameDate ? dayjs(rawGameDate) : null;
     const hasValidGameDate = Boolean(parsedGameDate && parsedGameDate.isValid());
+    // While the clock runs the calendar keeps moving between turns: what is
+    // shown is the last committed turn plus the whole days waiting to be — or
+    // currently being — simulated. It only ever moves forward, because a commit
+    // folds those days into the game date and drops them from the backlog in the
+    // same breath (see displayDayOffset in runtime/realtimeCore.js).
+    const liveDayOffset = clock.running ? clock.dayOffset || 0 : 0;
+    const shownGameDate =
+    hasValidGameDate && liveDayOffset > 0 ? parsedGameDate.add(liveDayOffset, "day") : parsedGameDate;
     // Mobile shares the row with the country name, so abbreviate the month.
     const displayDate = !gameData
     ? "Loading..."
     : hasValidGameDate
-    ? parsedGameDate.format(isMobile && playerCountry ? "MMM Do, YYYY" : "MMMM Do, YYYY")
+    ? shownGameDate.format(isMobile && playerCountry ? "MMM Do, YYYY" : "MMMM Do, YYYY")
     : String(rawGameDate).trim() || "Undated";
     const currentDate = hasValidGameDate
     ? parsedGameDate.format("YYYY-MM-DD")
@@ -1535,6 +1824,42 @@ const DateWidget = ({
         const bounds = deriveEventFocusBounds(activeVisibleEvent, { countryBounds, regionBounds, polityLookup });
         focusMapOnBounds(mapRef, bounds);
     }, [activeVisibleEvent, countryBounds, disableEventCamera, mapRef, polityLookup, regionBounds]);
+
+    // The live ticker under the transport bar: the newest reports the clock has
+    // revealed so far, newest first. It stands down when the full event log is
+    // open in front of the player — the same events, twice, is just noise.
+    const feedEvents = useMemo(() => {
+        if (!isLiveTurn || openPanel === "history" || !(latestTurnRecord?.events?.length > 0)) {
+            return [];
+        }
+
+        const revealed = Math.min(Math.max(visibleEventCount, 1), latestTurnRecord.events.length);
+        return latestTurnRecord.events.slice(0, revealed).slice(-3).reverse();
+    }, [isLiveTurn, latestTurnRecord, openPanel, visibleEventCount]);
+
+    // Nobody is there to press "Next event" while the world runs itself, so the
+    // clock reveals them on a beat of its own. Map staging and the event camera
+    // key off the same counter, so a real-time turn plays out on the map exactly
+    // as a manually revealed one does.
+    useEffect(() => {
+        if (!isLiveTurn || totalVisibleEvents <= 0 || visibleEventCount >= totalVisibleEvents) {
+            return undefined;
+        }
+
+        // Pace the reveal so a whole turn is through before the next one lands:
+        // a fast speed covers more history per turn, so its events queue up
+        // behind each other unless they come a little quicker.
+        const tickSeconds = (clock.tickDays || 1) * (clock.speed?.secondsPerDay ?? 1);
+        const delay = Math.max(
+            REALTIME_MIN_REVEAL_MS,
+            Math.min(REALTIME_REVEAL_MS, (tickSeconds * 1000) / totalVisibleEvents),
+        );
+        const timer = setTimeout(() => {
+            setVisibleEventCount((current) => Math.min(totalVisibleEvents, current + 1));
+        }, delay);
+
+        return () => clearTimeout(timer);
+    }, [clock.speed, clock.tickDays, isLiveTurn, totalVisibleEvents, visibleEventCount]);
 
     const revealNextEvent = () => {
         setVisibleEventCount((current) => {
@@ -1576,7 +1901,7 @@ const DateWidget = ({
     // engaged for that turn.
     useEffect(() => {
         const record = latestTurnRecord;
-        if (openPanel !== "history" || !record || !(record.events?.length > 0)) {
+        if (!isRevealing || !record || !(record.events?.length > 0)) {
             return undefined;
         }
         if (stagedBase.recordId === record.id && stagedBase.world) {
@@ -1597,12 +1922,12 @@ const DateWidget = ({
         return () => {
             cancelled = true;
         };
-    }, [latestTurnRecord?.id, openPanel, stagedBase.recordId]);
+    }, [isRevealing, latestTurnRecord?.id, stagedBase.recordId]);
 
     useEffect(() => {
         const record = latestTurnRecord;
         const stagingActive =
-            openPanel === "history" &&
+            isRevealing &&
             record &&
             stagedBase.recordId === record.id &&
             stagedBase.world &&
@@ -1621,7 +1946,7 @@ const DateWidget = ({
         });
         setWorldStateOverride(stagedWorld);
         setUnitsOverride(stagedWorld.units ?? []);
-    }, [latestTurnRecord, openPanel, stagedBase, totalVisibleEvents, visibleEventCount]);
+    }, [isRevealing, latestTurnRecord, stagedBase, totalVisibleEvents, visibleEventCount]);
 
     // Never leave a stale override behind when this widget unmounts.
     useEffect(
@@ -1658,6 +1983,18 @@ const DateWidget = ({
         topOffset={topOffset}
         visibleEventCount={visibleEventCount}
         warning={fallbackWarning || persistedFallbackWarning}
+        />
+
+        <RealtimeDock
+        clock={clock}
+        disabled={!gameData || isLoading}
+        feedEvents={feedEvents}
+        onCancel={cancelRealtimeTick}
+        onCycleSpeed={cycleRealtimeSpeed}
+        onOpenHistory={() => setPanel("history")}
+        onToggle={() => { toggleRealtime(); }}
+        rightShift={rightShift}
+        topOffset={topOffset}
         />
 
         <div
